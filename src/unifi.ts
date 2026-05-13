@@ -16,11 +16,18 @@
 export interface UnifiSession {
   host: string;
   username: string;
+  // Kept on the session so authedFetch() can transparently re-login when the
+  // UDM expires the cookie (typically after ~2h). The password is already
+  // plaintext in the persisted config; the in-memory copy doesn't change that.
+  password: string;
   site: string;
   cookie: string;
   csrfToken: string | null;
   isUnifiOs: boolean;
   controllerInfo?: Record<string, unknown>;
+  // De-dupes concurrent re-login attempts when multiple requests get 401 at
+  // the same time. First caller drives the login; the rest await it.
+  reloginPending?: Promise<void> | null;
 }
 
 export class UnifiError extends Error {
@@ -77,26 +84,24 @@ async function detectUnifiOs(host: string): Promise<boolean> {
   return false;
 }
 
-export async function login(opts: {
-  host: string;
-  username: string;
-  password: string;
-  site?: string;
-}): Promise<UnifiSession> {
-  const host = normalizeHost(opts.host);
-  const trimmedSite = opts.site?.trim();
-  const site = trimmedSite && trimmedSite.length > 0 ? trimmedSite : "default";
-  const isUnifiOs = await detectUnifiOs(host);
+interface LoginResult {
+  cookie: string;
+  csrfToken: string | null;
+  controllerInfo?: Record<string, unknown>;
+}
+
+async function performLogin(
+  host: string,
+  isUnifiOs: boolean,
+  username: string,
+  password: string,
+): Promise<LoginResult> {
   const loginPath = isUnifiOs ? "/api/auth/login" : "/api/login";
 
   const res = await fetch(`${host}${loginPath}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: opts.username,
-      password: opts.password,
-      remember: true,
-    }),
+    body: JSON.stringify({ username, password, remember: true }),
     redirect: "manual",
     ...FETCH_TLS_OPTS,
   });
@@ -136,15 +141,63 @@ export async function login(opts: {
     // login response had no JSON body
   }
 
+  return { cookie, csrfToken, controllerInfo };
+}
+
+export async function login(opts: {
+  host: string;
+  username: string;
+  password: string;
+  site?: string;
+}): Promise<UnifiSession> {
+  const host = normalizeHost(opts.host);
+  const trimmedSite = opts.site?.trim();
+  const site = trimmedSite && trimmedSite.length > 0 ? trimmedSite : "default";
+  const isUnifiOs = await detectUnifiOs(host);
+  const { cookie, csrfToken, controllerInfo } = await performLogin(
+    host,
+    isUnifiOs,
+    opts.username,
+    opts.password,
+  );
+
   return {
     host,
     username: opts.username,
+    password: opts.password,
     site,
     cookie,
     csrfToken,
     isUnifiOs,
     controllerInfo,
+    reloginPending: null,
   };
+}
+
+// Refreshes the cookie/CSRF on an existing session in place. Used by
+// authedFetch() when the UDM returns 401 (the cookie has expired). Concurrent
+// callers share a single in-flight login via session.reloginPending so a burst
+// of expired-cookie 401s only triggers one re-auth, not one per request.
+async function relogin(session: UnifiSession): Promise<void> {
+  if (session.reloginPending) {
+    await session.reloginPending;
+    return;
+  }
+  session.reloginPending = (async () => {
+    const { cookie, csrfToken } = await performLogin(
+      session.host,
+      session.isUnifiOs,
+      session.username,
+      session.password,
+    );
+    session.cookie = cookie;
+    session.csrfToken = csrfToken;
+  })();
+  try {
+    await session.reloginPending;
+  } finally {
+    session.reloginPending = null;
+  }
 }
 
 function apiPath(session: UnifiSession, suffix: string): string {
@@ -157,23 +210,40 @@ async function authedFetch(
   url: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set("Cookie", session.cookie);
-  if (session.csrfToken) headers.set("X-CSRF-Token", session.csrfToken);
-  headers.set("Accept", "application/json");
-  const res = await fetch(url, {
-    ...init,
-    headers,
-    redirect: "manual",
-    ...FETCH_TLS_OPTS,
-  });
-  // UniFi OS rotates the CSRF token on every response. Without picking up the
-  // new value, the next mutating request gets rejected — on some firmwares
-  // with a misleading "not connected to a UDM" 400 instead of a clean 403.
-  const nextCsrf =
-    res.headers.get("x-csrf-token") ?? res.headers.get("x-updated-csrf-token");
-  if (nextCsrf) session.csrfToken = nextCsrf;
-  return res;
+  const doFetch = async (): Promise<Response> => {
+    const headers = new Headers(init.headers);
+    headers.set("Cookie", session.cookie);
+    if (session.csrfToken) headers.set("X-CSRF-Token", session.csrfToken);
+    headers.set("Accept", "application/json");
+    const res = await fetch(url, {
+      ...init,
+      headers,
+      redirect: "manual",
+      ...FETCH_TLS_OPTS,
+    });
+    // UniFi OS rotates the CSRF token on every response. Without picking up
+    // the new value, the next mutating request gets rejected — on some
+    // firmwares with a misleading "not connected to a UDM" 400 instead of a
+    // clean 403.
+    const nextCsrf =
+      res.headers.get("x-csrf-token") ??
+      res.headers.get("x-updated-csrf-token");
+    if (nextCsrf) session.csrfToken = nextCsrf;
+    return res;
+  };
+
+  const res = await doFetch();
+  // UDM cookies expire after ~2h. On 401, transparently re-login and retry
+  // once so long-running processes (the auto-sync scheduler) stay alive
+  // without operator intervention. If the re-login itself fails (creds
+  // changed, UDM unreachable), surface the original 401 to the caller.
+  if (res.status !== 401) return res;
+  try {
+    await relogin(session);
+  } catch {
+    return res;
+  }
+  return doFetch();
 }
 
 async function readJson(res: Response): Promise<unknown> {
