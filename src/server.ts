@@ -39,10 +39,17 @@ const log = getLogger(["app"]);
 // browser session id only authorizes access to the UDM connection it opened.
 const sessions = new Map<string, UnifiSession>();
 
-// Session restored from persisted config after unlock. Any browser hitting
-// /api/status without a valid cookie gets attached to this so the UI reconnects
-// automatically after a server restart + unlock.
+// Session the server owns itself — established from persisted config on boot
+// (without waiting for an unlock) and used by the auto-sync scheduler. The UI
+// also attaches to this so a browser hitting /api/status without a valid
+// cookie reconnects automatically after a server restart + unlock.
 let restoredSid: string | null = null;
+
+// Serializes concurrent ensureUdmSession() calls so we don't open multiple
+// parallel UDM logins from overlapping timer fires + an unlock at boot.
+const loginGuard: { pending: Promise<UnifiSession | null> | null } = {
+  pending: null,
+};
 
 function newSessionId(): string {
   return crypto.randomUUID().replace(/-/g, "");
@@ -83,10 +90,11 @@ function getSession(req: Request): {
     const direct = sessions.get(cookieSid);
     if (direct) return { cookieSid, sid: cookieSid, session: direct };
   }
-  // Fall back to the session we restored from persisted config on unlock so
-  // that a browser whose cookie no longer matches the in-memory map (server
-  // restart, --hot reload) still finds the live UDM session instead of getting
-  // a 401. handleStatus is what eventually refreshes the cookie.
+  // Fall back to the scheduler-owned session (established at boot from
+  // persisted config, see ensureUdmSession) so a browser whose cookie no
+  // longer matches the in-memory map (server restart, --hot reload) still
+  // finds the live UDM session instead of getting a 401. handleStatus is
+  // what eventually refreshes the cookie.
   if (restoredSid) {
     const restored = sessions.get(restoredSid);
     if (restored) return { cookieSid, sid: restoredSid, session: restored };
@@ -98,23 +106,47 @@ function lockedResponse(): Response {
   return json({ error: "Database is locked" }, { status: 423 });
 }
 
-async function restoreSessionFromConfig(): Promise<void> {
-  // loadConfig() throws if the persisted JSON is malformed or fails schema
-  // validation; we intentionally do NOT catch that so the caller surfaces it
-  // rather than silently dropping persisted state.
-  const cfg = loadConfig();
-  if (!cfg) return;
+// Returns the server-owned UDM session, lazily logging in from persisted
+// config if needed. Used by the auto-sync scheduler so a fresh server boot
+// (or an earlier login failure) doesn't permanently disable auto-sync —
+// every timer fire gets another chance to establish the session.
+//
+// Callers running concurrently share a single in-flight login so we never
+// open multiple parallel UDM sessions from overlapping timer fires.
+async function ensureUdmSession(): Promise<UnifiSession | null> {
+  if (restoredSid) {
+    const existing = sessions.get(restoredSid);
+    if (existing) return existing;
+    // The sid we remembered is gone (e.g. cleared on disconnect). Reset and
+    // try to log in again.
+    restoredSid = null;
+  }
+  if (loginGuard.pending) return loginGuard.pending;
+  loginGuard.pending = (async () => {
+    // loadConfig() throws if the persisted JSON is malformed or fails schema
+    // validation; we intentionally do NOT catch that so the operator sees the
+    // problem rather than silently dropping persisted state.
+    const cfg = loadConfig();
+    if (!cfg) return null;
+    try {
+      const session = await login(cfg);
+      const sid = newSessionId();
+      sessions.set(sid, session);
+      restoredSid = sid;
+      log.info(
+        "Established UDM session for {user}@{host} (site: {site})",
+        { user: session.username, host: session.host, site: session.site },
+      );
+      return session;
+    } catch (err) {
+      log.error("Could not log in to UDM from saved config: {err}", { err });
+      return null;
+    }
+  })();
   try {
-    const session = await login(cfg);
-    const sid = newSessionId();
-    sessions.set(sid, session);
-    restoredSid = sid;
-    log.info(
-      "Restored session for {user}@{host} (site: {site})",
-      { user: session.username, host: session.host, site: session.site },
-    );
-  } catch (err) {
-    log.error("Could not restore session from saved config: {err}", { err });
+    return await loginGuard.pending;
+  } finally {
+    loginGuard.pending = null;
   }
 }
 
@@ -179,27 +211,25 @@ async function handleAuthUnlock(req: Request): Promise<Response> {
     const msg = err instanceof Error ? err.message : String(err);
     return json({ error: msg }, { status: 500 });
   }
-  await restoreSessionFromConfig();
+  // ensureUdmSession() is idempotent and may have already run at boot — calling
+  // it again only opens a new UDM session if the boot-time attempt failed (e.g.
+  // UDM was unreachable). rescheduleAllAutoSync() is similarly idempotent and
+  // ensures timers reflect any route_sources changes since boot.
+  await ensureUdmSession();
   rescheduleAllAutoSync();
   return json({ ok: true, initialized: true, unlocked: true });
 }
 
 function handleAuthLock(req: Request): Response {
-  // Drop any sessions tied to the unlocked DB — we no longer have the key to
-  // re-restore them and persisted credentials become unreadable until unlock.
-  const { sid } = getSession(req);
-  if (sid) {
-    const s = sessions.get(sid);
+  // Drop only the caller's browser session — the scheduler-owned restoredSid
+  // keeps running so auto-sync continues while the API is locked. The lock is
+  // an HTTP/UX gate, not a "shut down the world" command.
+  const { cookieSid } = getSession(req);
+  if (cookieSid && cookieSid !== restoredSid) {
+    const s = sessions.get(cookieSid);
     if (s) void logout(s);
-    sessions.delete(sid);
+    sessions.delete(cookieSid);
   }
-  if (restoredSid) {
-    const s = sessions.get(restoredSid);
-    if (s) void logout(s);
-    sessions.delete(restoredSid);
-    restoredSid = null;
-  }
-  clearAutoSyncTimers();
   lock();
   return json(
     { ok: true, initialized: isInitialized(), unlocked: false },
@@ -234,18 +264,28 @@ async function handleConnect(req: Request): Promise<Response> {
       site: body.site,
     });
 
-    // Replace any existing session for this browser.
-    const { sid: existingSid } = getSession(req);
-    if (existingSid) {
-      const existing = sessions.get(existingSid);
+    // Replace any existing session for this browser AND the scheduler-owned
+    // session — the operator just supplied new credentials, so any old
+    // restoredSid points at a session that may be for the wrong UDM.
+    const { cookieSid } = getSession(req);
+    if (cookieSid) {
+      const existing = sessions.get(cookieSid);
       if (existing) {
         void logout(existing);
-        sessions.delete(existingSid);
+        sessions.delete(cookieSid);
       }
+    }
+    if (restoredSid && restoredSid !== cookieSid) {
+      const prev = sessions.get(restoredSid);
+      if (prev) void logout(prev);
+      sessions.delete(restoredSid);
     }
 
     const sid = newSessionId();
     sessions.set(sid, session);
+    // Hand the freshly opened session to the scheduler so its next tick
+    // doesn't open a redundant login.
+    restoredSid = sid;
 
     try {
       saveConfig({
@@ -257,6 +297,10 @@ async function handleConnect(req: Request): Promise<Response> {
     } catch (saveErr) {
       log.error("Failed to persist config: {err}", { err: saveErr });
     }
+
+    // route_sources might already exist from a prior connection — make sure
+    // their timers are pointing at the now-valid UDM session.
+    rescheduleAllAutoSync();
 
     return json(
       {
@@ -285,12 +329,15 @@ function handleDisconnect(req: Request): Response {
   const { sid, session } = getSession(req);
   if (session) void logout(session);
   if (sid) sessions.delete(sid);
-  if (restoredSid && (sid === restoredSid || !sid)) {
+  if (restoredSid) {
     const restored = sessions.get(restoredSid);
     if (restored) void logout(restored);
     sessions.delete(restoredSid);
     restoredSid = null;
   }
+  // No UDM config means nothing for the scheduler to sync to — drop timers
+  // so we don't spam "no active UDM session" warnings every interval.
+  clearAutoSyncTimers();
   try {
     clearConfig();
   } catch (clearErr) {
@@ -453,7 +500,10 @@ function rescheduleRoute(routeId: string): void {
 
 function rescheduleAllAutoSync(): void {
   clearAutoSyncTimers();
-  if (!isUnlocked()) return;
+  // Auto-sync runs independently of the API lock state — only the existence
+  // of master credentials gates it (no master → no persisted config → nothing
+  // to sync against).
+  if (!isInitialized()) return;
   const all = listAllRouteSources();
   for (const [routeId, sources] of Object.entries(all)) {
     if (sources.intervalSeconds && sources.intervalSeconds >= MIN_INTERVAL_SECONDS) {
@@ -463,13 +513,14 @@ function rescheduleAllAutoSync(): void {
 }
 
 async function runScheduledSync(routeId: string): Promise<void> {
-  if (!isUnlocked()) {
-    log.warn("auto-sync skipped for {routeId}: database is locked", { routeId });
-    return;
-  }
-  const session = restoredSid ? sessions.get(restoredSid) ?? null : null;
+  // Re-establish the UDM session on demand so a one-shot login failure at
+  // boot (or an expired session) doesn't disable auto-sync forever.
+  const session = await ensureUdmSession();
   if (!session) {
-    log.warn("auto-sync skipped for {routeId}: no active UDM session", { routeId });
+    log.warn(
+      "auto-sync skipped for {routeId}: UDM session unavailable (no saved config or login failed)",
+      { routeId },
+    );
     return;
   }
   try {
@@ -706,3 +757,12 @@ const server = Bun.serve({
 });
 
 log.info(`Listening on ${server.url.toString()}`);
+
+// Boot-time bootstrap: schedule auto-sync timers and eagerly establish the
+// UDM session, both without waiting for an operator to unlock via the UI.
+// The API lock still gates HTTP access; this lets the scheduler keep routes
+// in sync autonomously across server restarts.
+if (isInitialized()) {
+  rescheduleAllAutoSync();
+  void ensureUdmSession();
+}

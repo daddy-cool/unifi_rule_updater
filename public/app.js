@@ -10,7 +10,6 @@ const els = {
   unlockForm: $("#unlock-form"),
   unlockBtn: $("#unlock-btn"),
   unlockError: $("#unlock-error"),
-  lockBtn: $("#lock-btn"),
   connectPanel: $("#connect-panel"),
   rulesPanel: $("#rules-panel"),
   form: $("#connect-form"),
@@ -19,15 +18,9 @@ const els = {
   refreshBtn: $("#refresh-btn"),
   connectError: $("#connect-error"),
   rulesSummary: $("#rules-summary"),
-  legacyCount: $("#legacy-count"),
-  legacyError: $("#legacy-error"),
-  legacyTbody: $("#legacy-table tbody"),
   zoneCount: $("#zone-count"),
   zoneError: $("#zone-error"),
   zoneTbody: $("#zone-table tbody"),
-  legacyRouteCount: $("#legacy-route-count"),
-  legacyRouteError: $("#legacy-route-error"),
-  legacyRouteTbody: $("#legacy-route-table tbody"),
   trafficRouteCount: $("#traffic-route-count"),
   trafficRouteError: $("#traffic-route-error"),
   trafficRouteTbody: $("#traffic-route-table tbody"),
@@ -56,7 +49,6 @@ function showSetup() {
   els.setupPanel.hidden = false;
   els.status.textContent = "First-time setup";
   els.status.className = "status status-disconnected";
-  els.lockBtn.hidden = true;
   els.disconnectBtn.hidden = true;
 }
 
@@ -65,7 +57,6 @@ function showUnlock() {
   els.unlockPanel.hidden = false;
   els.status.textContent = "Locked";
   els.status.className = "status status-disconnected";
-  els.lockBtn.hidden = true;
   els.disconnectBtn.hidden = true;
 }
 
@@ -74,7 +65,6 @@ function showConnect() {
   els.connectPanel.hidden = false;
   els.status.textContent = "Unlocked — not connected";
   els.status.className = "status status-disconnected";
-  els.lockBtn.hidden = false;
   els.disconnectBtn.hidden = true;
 }
 
@@ -83,14 +73,11 @@ function setConnected(info) {
   els.rulesPanel.hidden = false;
   els.status.textContent = `Connected — ${info.username}@${info.host} (site: ${info.site})`;
   els.status.className = "status status-connected";
-  els.lockBtn.hidden = false;
   els.disconnectBtn.hidden = false;
 }
 
 function clearTables() {
-  els.legacyTbody.innerHTML = "";
   els.zoneTbody.innerHTML = "";
-  els.legacyRouteTbody.innerHTML = "";
   els.trafficRouteTbody.innerHTML = "";
   els.rawJson.textContent = "";
 }
@@ -122,21 +109,6 @@ function enabledBadge(enabled) {
     return `<span class="badge badge-disabled">no</span>`;
   }
   return `<span class="badge">—</span>`;
-}
-
-function legacySourceDest(rule, kind) {
-  // Legacy rules have src_*/dst_* fields with addresses, networks, and ports.
-  const prefix = kind === "src" ? "src" : "dst";
-  const parts = [];
-  const addr = rule[`${prefix}_address`];
-  const net = rule[`${prefix}_networkconf_id`];
-  const grp = rule[`${prefix}_firewallgroup_ids`];
-  const port = rule[`${prefix}_port`];
-  if (addr) parts.push(addr);
-  if (net) parts.push(`net:${net.slice(0, 6)}…`);
-  if (Array.isArray(grp) && grp.length) parts.push(`grp×${grp.length}`);
-  if (port) parts.push(`:${port}`);
-  return parts.join(" ") || "any";
 }
 
 function humanizeKey(k) {
@@ -274,26 +246,6 @@ function appendRow(tbody, summaryCells, detail) {
   tbody.appendChild(detailRow);
 }
 
-function renderLegacy(data) {
-  els.legacyCount.textContent = String(data.count);
-  showError(els.legacyError, data.ok ? "" : data.error || "Unavailable");
-  els.legacyTbody.innerHTML = "";
-  if (!data.ok) return;
-  data.rules.forEach((r, i) => {
-    const summary = `
-      <td>${r.rule_index ?? i + 1}</td>
-      <td>${escapeHtml(r.name ?? "")}</td>
-      <td>${escapeHtml(r.ruleset ?? "")}</td>
-      <td>${actionBadge(r.action)}</td>
-      <td>${escapeHtml(r.protocol ?? r.protocol_v6 ?? "any")}</td>
-      <td>${escapeHtml(legacySourceDest(r, "src"))}</td>
-      <td>${escapeHtml(legacySourceDest(r, "dst"))}</td>
-      <td>${enabledBadge(r.enabled)}</td>
-    `;
-    appendRow(els.legacyTbody, summary, renderDetailCell(r, [], 9));
-  });
-}
-
 function zoneEndpoint(side) {
   if (!side) return "—";
   if (typeof side === "string") return side;
@@ -318,44 +270,6 @@ function renderZone(data) {
       <td>${enabledBadge(p.enabled)}</td>
     `;
     appendRow(els.zoneTbody, summary, renderDetailCell(p, [], 8));
-  });
-}
-
-function legacyRouteNextHop(r) {
-  if (r.gateway_type === "default") return "default";
-  if (r.next_hop_type === "interface" || r.type === "interface-route") {
-    return r.interface ?? "interface";
-  }
-  if (r.gateway_device) return `device:${r.gateway_device}`;
-  if (r.static_route_nexthop) return r.static_route_nexthop;
-  if (r.next_hop) return r.next_hop;
-  return "—";
-}
-
-function legacyRouteDest(r) {
-  return (
-    r.static_route_network ??
-    r.policy_route_source_address ??
-    r.network ??
-    "—"
-  );
-}
-
-function renderLegacyRoutes(data) {
-  els.legacyRouteCount.textContent = String(data.count);
-  showError(els.legacyRouteError, data.ok ? "" : data.error || "Unavailable");
-  els.legacyRouteTbody.innerHTML = "";
-  if (!data.ok) return;
-  data.routes.forEach((r) => {
-    const summary = `
-      <td>${escapeHtml(r.name ?? "")}</td>
-      <td>${escapeHtml(legacyRouteDest(r))}</td>
-      <td>${escapeHtml(legacyRouteNextHop(r))}</td>
-      <td>${escapeHtml(r.type ?? r.static_route_type ?? "")}</td>
-      <td>${escapeHtml(r.static_route_distance ?? r.distance ?? "—")}</td>
-      <td>${enabledBadge(r.enabled)}</td>
-    `;
-    appendRow(els.legacyRouteTbody, summary, renderDetailCell(r, [], 7));
   });
 }
 
@@ -447,17 +361,13 @@ async function loadRules() {
     if (!routesRes.ok) {
       showError(els.connectError, routes.error ?? "Failed to load routes");
     }
-    renderLegacy(rules.legacy);
     renderZone(rules.zonePolicies);
-    renderLegacyRoutes(routes.legacy ?? { ok: false, count: 0, routes: [] });
     renderTrafficRoutes(
       routes.trafficRoutes ?? { ok: false, count: 0, routes: [] },
       allSources,
     );
     els.rulesSummary.textContent =
-      `Legacy rules: ${rules.legacy.count} · ` +
       `Zone policies: ${rules.zonePolicies.count} · ` +
-      `Legacy policy routes: ${routes.legacy?.count ?? 0} · ` +
       `Traffic routes: ${routes.trafficRoutes?.count ?? 0}`;
     els.rawJson.textContent = JSON.stringify({ rules, routes }, null, 2);
   } catch (err) {
@@ -590,12 +500,6 @@ els.unlockForm.addEventListener("submit", async (e) => {
     els.unlockBtn.disabled = false;
     els.unlockBtn.textContent = "Unlock";
   }
-});
-
-els.lockBtn.addEventListener("click", async () => {
-  await fetch("/api/auth/lock", { method: "POST" });
-  clearTables();
-  await checkStatus();
 });
 
 els.refreshBtn.addEventListener("click", loadRules);

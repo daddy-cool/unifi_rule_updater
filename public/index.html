@@ -13,7 +13,6 @@
     <h1>UniFi Network Rule Updater</h1>
     <div class="header-right">
       <div id="status" class="status status-disconnected">Disconnected</div>
-      <button type="button" id="lock-btn" hidden>Lock</button>
       <button type="button" id="disconnect-btn" hidden>Disconnect</button>
     </div>
   </header>
@@ -101,29 +100,6 @@
       </header>
       <div id="rules-summary" class="summary"></div>
 
-      <details id="legacy-section">
-        <summary>Legacy Firewall Rules (<span id="legacy-count">0</span>)</summary>
-        <div id="legacy-error" class="error" hidden></div>
-        <div class="table-wrap">
-          <table id="legacy-table" class="expandable">
-            <thead>
-              <tr>
-                <th></th>
-                <th>#</th>
-                <th>Name</th>
-                <th>Ruleset</th>
-                <th>Action</th>
-                <th>Protocol</th>
-                <th>Source</th>
-                <th>Destination</th>
-                <th>Enabled</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-
       <details id="zone-section">
         <summary>
           Zone-Based Firewall Policies (<span id="zone-count">0</span>)
@@ -140,30 +116,6 @@
                 <th>Source Zone</th>
                 <th>Destination Zone</th>
                 <th>Protocol</th>
-                <th>Enabled</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-
-      <details id="legacy-route-section">
-        <summary>
-          Policy-Based Routes — Legacy
-          (<span id="legacy-route-count">0</span>)
-        </summary>
-        <div id="legacy-route-error" class="error" hidden></div>
-        <div class="table-wrap">
-          <table id="legacy-route-table" class="expandable">
-            <thead>
-              <tr>
-                <th></th>
-                <th>Name</th>
-                <th>Destination</th>
-                <th>Next Hop</th>
-                <th>Type</th>
-                <th>Distance</th>
                 <th>Enabled</th>
               </tr>
             </thead>

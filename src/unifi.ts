@@ -9,9 +9,9 @@
 //   - Login:   POST  /api/login                 { username, password }
 //   - API:     /api/...
 //
-// Firewall data lives in two places on modern firmware:
-//   - Legacy rules:  /api/s/{site}/rest/firewallrule
-//   - Zone-based v2: /v2/api/site/{site}/firewall-policies
+// Firewall and routing data this app cares about live at the v2 endpoints:
+//   - Zone-based firewall policies: /v2/api/site/{site}/firewall-policies
+//   - Traffic routes:               /v2/api/site/{site}/trafficroutes
 
 export interface UnifiSession {
   host: string;
@@ -187,12 +187,6 @@ async function readJson(res: Response): Promise<unknown> {
 }
 
 export interface FirewallRulesResult {
-  legacy: {
-    ok: boolean;
-    count: number;
-    rules: unknown[];
-    error?: string;
-  };
   zonePolicies: {
     ok: boolean;
     count: number;
@@ -205,36 +199,10 @@ export async function getFirewallRules(
   session: UnifiSession,
 ): Promise<FirewallRulesResult> {
   const result: FirewallRulesResult = {
-    legacy: { ok: false, count: 0, rules: [] },
     zonePolicies: { ok: false, count: 0, policies: [] },
   };
 
-  // Legacy v1 firewall rules.
-  try {
-    const url = apiPath(
-      session,
-      `/api/s/${encodeURIComponent(session.site)}/rest/firewallrule`,
-    );
-    const res = await authedFetch(session, url);
-    const body = (await readJson(res)) as
-      | { data?: unknown[]; meta?: { rc?: string; msg?: string } }
-      | string
-      | null;
-    if (res.ok && body && typeof body === "object" && Array.isArray(body.data)) {
-      result.legacy.ok = true;
-      result.legacy.rules = body.data;
-      result.legacy.count = body.data.length;
-    } else {
-      result.legacy.error =
-        typeof body === "object" && body?.meta?.msg
-          ? body.meta.msg
-          : `HTTP ${String(res.status)}`;
-    }
-  } catch (err) {
-    result.legacy.error = err instanceof Error ? err.message : String(err);
-  }
-
-  // Modern zone-based firewall policies (Network 8.x+).
+  // Zone-based firewall policies (Network 8.x+).
   try {
     const url = apiPath(
       session,
@@ -271,12 +239,6 @@ export async function getFirewallRules(
 }
 
 export interface PolicyRoutesResult {
-  legacy: {
-    ok: boolean;
-    count: number;
-    routes: unknown[];
-    error?: string;
-  };
   trafficRoutes: {
     ok: boolean;
     count: number;
@@ -289,48 +251,10 @@ export async function getPolicyRoutes(
   session: UnifiSession,
 ): Promise<PolicyRoutesResult> {
   const result: PolicyRoutesResult = {
-    legacy: { ok: false, count: 0, routes: [] },
     trafficRoutes: { ok: false, count: 0, routes: [] },
   };
 
-  // Legacy: /rest/routing returns all routes; we filter to policy-based ones.
-  try {
-    const url = apiPath(
-      session,
-      `/api/s/${encodeURIComponent(session.site)}/rest/routing`,
-    );
-    const res = await authedFetch(session, url);
-    const body = (await readJson(res)) as
-      | { data?: unknown[]; meta?: { rc?: string; msg?: string } }
-      | string
-      | null;
-    if (res.ok && body && typeof body === "object" && Array.isArray(body.data)) {
-      const policyRoutes = body.data.filter((r) => {
-        if (!r || typeof r !== "object") return false;
-        const t = (r as { type?: string }).type;
-        // UniFi tags policy-based static routes with type === "policy".
-        // Also include entries that have policy_route_* fields, which is what
-        // newer firmwares use even on the legacy endpoint.
-        return (
-          t === "policy" ||
-          "policy_route_action" in (r) ||
-          "next_hop_type" in (r)
-        );
-      });
-      result.legacy.ok = true;
-      result.legacy.routes = policyRoutes;
-      result.legacy.count = policyRoutes.length;
-    } else {
-      result.legacy.error =
-        typeof body === "object" && body?.meta?.msg
-          ? body.meta.msg
-          : `HTTP ${String(res.status)}`;
-    }
-  } catch (err) {
-    result.legacy.error = err instanceof Error ? err.message : String(err);
-  }
-
-  // Modern v2: traffic routes (Network 8.x+).
+  // Traffic routes (Network 8.x+).
   try {
     const url = apiPath(
       session,

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "unifi-network-rule-updater",
+      "name": "unifi-rule-updater",
       "dependencies": {
         "@logtape/logtape": "^2.0.7",
         "@logtape/pretty": "^2.0.7",

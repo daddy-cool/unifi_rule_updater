@@ -9,9 +9,18 @@
 // gates API access but is NOT a key for encrypted storage. The master
 // password is stored as a scrypt-derived hash for login verification only.
 //
+// Lock semantics: the unlock flag is enforced at the HTTP boundary in
+// server.ts, not at the storage layer. Reads and the scheduler-internal
+// write (saveManagedCidrs) work regardless of unlock state so the auto-sync
+// scheduler can run autonomously after a cold boot without an operator
+// having to unlock via the UI. Operator-driven writes (saveConfig /
+// clearConfig / saveRouteSources) still call requireUnlocked() as a
+// defense-in-depth check.
+//
 // Database states:
 //   - uninitialized: no `master` row → setupMaster() must be called.
-//   - locked: `master` row present, no unlock flag → unlock() must be called.
+//   - locked: `master` row present, no unlock flag → unlock() must be called
+//     before the HTTP API will serve non-auth requests.
 //   - unlocked: in-memory unlock flag is set.
 
 import { Database } from "bun:sqlite";
@@ -208,7 +217,8 @@ function isStoredConfig(v: unknown): v is StoredConfig {
 }
 
 export function loadConfig(): StoredConfig | null {
-  requireUnlocked();
+  // No lock check: the scheduler reads this on cold boot to log into the UDM
+  // before any operator has unlocked. The HTTP layer guards external access.
   const row = selectStmt.get();
   if (!row) return null;
   const parsed: unknown = JSON.parse(row.data);
@@ -257,7 +267,7 @@ function isRouteSources(v: unknown): v is RouteSources {
 }
 
 export function loadRouteSources(routeId: string): RouteSources | null {
-  requireUnlocked();
+  // No lock check: needed by the cold-boot scheduler.
   const row = sourcesSelectStmt.get(routeId);
   if (!row) return null;
   const parsed: unknown = JSON.parse(row.data);
@@ -280,7 +290,7 @@ const sourcesAllStmt = db.query<
 >("SELECT route_id, data FROM route_sources");
 
 export function listAllRouteSources(): Record<string, RouteSources> {
-  requireUnlocked();
+  // No lock check: needed by the cold-boot scheduler.
   const out: Record<string, RouteSources> = {};
   for (const row of sourcesAllStmt.all()) {
     const parsed: unknown = JSON.parse(row.data);
@@ -310,7 +320,7 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 export function loadManagedCidrs(routeId: string): string[] {
-  requireUnlocked();
+  // No lock check: needed by the cold-boot scheduler.
   const row = managedSelectStmt.get(routeId);
   if (!row) return [];
   const parsed: unknown = JSON.parse(row.data);
@@ -323,7 +333,7 @@ export function loadManagedCidrs(routeId: string): string[] {
 }
 
 export function saveManagedCidrs(routeId: string, cidrs: string[]): void {
-  requireUnlocked();
+  // No lock check: the scheduler updates this after each autonomous sync.
   if (cidrs.length === 0) {
     managedDeleteStmt.run(routeId);
     return;
