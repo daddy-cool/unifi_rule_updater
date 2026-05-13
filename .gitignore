@@ -1,0 +1,8 @@
+node_modules/
+bun.lockb
+.env
+.env.local
+*.log
+.DS_Store
+config
+.claude/*.local.json

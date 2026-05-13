@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UniFi Network Rule Updater</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+  <header>
+    <h1>UniFi Network Rule Updater</h1>
+    <div class="header-right">
+      <div id="status" class="status status-disconnected">Disconnected</div>
+      <button type="button" id="lock-btn" hidden>Lock</button>
+      <button type="button" id="disconnect-btn" hidden>Disconnect</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="setup-panel" class="panel" hidden>
+      <h2>First-time setup</h2>
+      <p class="sources-help">
+        Choose a username and password. The local configuration database is encrypted with a key derived from these credentials — you'll be asked for them each time the server starts. There is no recovery if you forget them; the database can only be deleted and recreated.
+      </p>
+      <form id="setup-form">
+        <label>
+          Username
+          <input name="username" type="text" required autocomplete="username" />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" required autocomplete="new-password" minlength="8" />
+          <small>Minimum 8 characters.</small>
+        </label>
+        <label>
+          Repeat password
+          <input name="passwordConfirm" type="password" required autocomplete="new-password" />
+        </label>
+        <div class="actions">
+          <button type="submit" id="setup-btn">Create</button>
+        </div>
+        <div id="setup-error" class="error" hidden></div>
+      </form>
+    </section>
+
+    <section id="unlock-panel" class="panel" hidden>
+      <h2>Unlock configuration</h2>
+      <p class="sources-help">
+        Enter the master username and password you set up earlier to decrypt the saved configuration.
+      </p>
+      <form id="unlock-form">
+        <label>
+          Username
+          <input name="username" type="text" required autocomplete="username" />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" required autocomplete="current-password" />
+        </label>
+        <div class="actions">
+          <button type="submit" id="unlock-btn">Unlock</button>
+        </div>
+        <div id="unlock-error" class="error" hidden></div>
+      </form>
+    </section>
+
+    <section id="connect-panel" class="panel" hidden>
+      <h2>Connect to UDM</h2>
+      <form id="connect-form">
+        <label>
+          Host
+          <input name="host" type="text" placeholder="192.168.1.1 or unifi.example.com" required autocomplete="off" />
+          <small>Hostname or IP. https:// is assumed.</small>
+        </label>
+        <label>
+          Username
+          <input name="username" type="text" required autocomplete="username" />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" required autocomplete="current-password" />
+        </label>
+        <label>
+          Site
+          <input name="site" type="text" value="default" />
+          <small>The Network site name. Usually "default".</small>
+        </label>
+        <div class="actions">
+          <button type="submit" id="connect-btn">Connect</button>
+        </div>
+        <div id="connect-error" class="error" hidden></div>
+      </form>
+    </section>
+
+    <section id="rules-panel" class="panel" hidden>
+      <header class="panel-header">
+        <h2>Firewall &amp; Routing</h2>
+        <button type="button" id="refresh-btn">Refresh</button>
+      </header>
+      <div id="rules-summary" class="summary"></div>
+
+      <details id="legacy-section">
+        <summary>Legacy Firewall Rules (<span id="legacy-count">0</span>)</summary>
+        <div id="legacy-error" class="error" hidden></div>
+        <div class="table-wrap">
+          <table id="legacy-table" class="expandable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>#</th>
+                <th>Name</th>
+                <th>Ruleset</th>
+                <th>Action</th>
+                <th>Protocol</th>
+                <th>Source</th>
+                <th>Destination</th>
+                <th>Enabled</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details id="zone-section">
+        <summary>
+          Zone-Based Firewall Policies (<span id="zone-count">0</span>)
+        </summary>
+        <div id="zone-error" class="error" hidden></div>
+        <div class="table-wrap">
+          <table id="zone-table" class="expandable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>#</th>
+                <th>Name</th>
+                <th>Action</th>
+                <th>Source Zone</th>
+                <th>Destination Zone</th>
+                <th>Protocol</th>
+                <th>Enabled</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details id="legacy-route-section">
+        <summary>
+          Policy-Based Routes — Legacy
+          (<span id="legacy-route-count">0</span>)
+        </summary>
+        <div id="legacy-route-error" class="error" hidden></div>
+        <div class="table-wrap">
+          <table id="legacy-route-table" class="expandable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Name</th>
+                <th>Destination</th>
+                <th>Next Hop</th>
+                <th>Type</th>
+                <th>Distance</th>
+                <th>Enabled</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details id="traffic-route-section">
+        <summary>
+          Traffic Routes (Policy-Based)
+          (<span id="traffic-route-count">0</span>)
+        </summary>
+        <div id="traffic-route-error" class="error" hidden></div>
+        <div class="table-wrap">
+          <table id="traffic-route-table" class="expandable">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Description</th>
+                <th>Matching Target</th>
+                <th>Target Devices</th>
+                <th>Next Hop / Interface</th>
+                <th>Kill Switch</th>
+                <th>Enabled</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details>
+        <summary>Raw JSON (all data)</summary>
+        <pre id="raw-json"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="/app.js" type="module"></script>
+</body>
+
+</html>

@@ -1,0 +1,11 @@
+.git
+.gitignore
+.claude
+.vscode
+.idea
+node_modules
+config
+*.md
+Dockerfile
+.dockerignore
+eslint.config.js
